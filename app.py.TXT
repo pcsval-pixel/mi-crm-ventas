@@ -1,0 +1,167 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, date
+import io
+
+# --- CONFIGURACIÓN Y ESTILO ---
+st.set_page_config(page_title="CRM Elite Pro", layout="wide", page_icon="💼")
+
+# CSS personalizado para mejorar la visualización de las métricas
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] { font-size: 28px; color: #1E88E5; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-weight: bold; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- INICIALIZACIÓN DE DATOS ---
+if 'db' not in st.session_state:
+    st.session_state.db = pd.DataFrame(columns=[
+        "Nombre/Empresa", "Teléfono", "Correo", "Dirección", 
+        "Nivel", "Tipo", "Último Contacto"
+    ])
+
+# --- LÓGICA DE NEGOCIO ---
+def get_alert_info(last_contact):
+    try:
+        # Normalizar fecha
+        if isinstance(last_contact, str):
+            last_contact = pd.to_datetime(last_contact).date()
+        elif isinstance(last_contact, datetime):
+            last_contact = last_contact.date()
+        
+        diff = (date.today() - last_contact).days
+        if diff >= 15: return "🔴 Critico (+15 días)", "High"
+        if diff >= 10: return "🟠 Seguimiento (+10 días)", "Medium"
+        if diff >= 5:  return "🟡 Contactar (+5 días)", "Low"
+        return "🟢 Al día", "None"
+    except:
+        return "⚪ Sin fecha", "N/A"
+
+# --- SIDEBAR: REGISTRO RÁPIDO ---
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3121/3121538.png", width=80)
+st.sidebar.title("Panel de Control")
+
+with st.sidebar.expander("➕ Registro Manual", expanded=False):
+    with st.form("form_registro"):
+        n_nombre = st.text_input("Nombre/Empresa")
+        n_tel = st.text_input("Teléfono")
+        n_mail = st.text_input("Email")
+        n_nivel = st.selectbox("Nivel", ["Bronce", "Plata", "Oro", "Platino"])
+        n_tipo = st.radio("Tipo", ["Fabricación", "Venta de Productos"])
+        n_fecha = st.date_input("Último Contacto", date.today())
+        
+        if st.form_submit_button("Añadir Cliente"):
+            if n_nombre:
+                new_row = pd.DataFrame([{
+                    "Nombre/Empresa": n_nombre, "Teléfono": n_tel, "Correo": n_mail,
+                    "Dirección": "No definida", "Nivel": n_nivel, "Tipo": n_tipo, 
+                    "Último Contacto": n_fecha
+                }])
+                st.session_state.db = pd.concat([st.session_state.db, new_row], ignore_index=True)
+                st.success("¡Cliente guardado!")
+                st.rerun()
+            else:
+                st.error("El nombre es obligatorio.")
+
+# --- CUERPO PRINCIPAL ---
+st.title("🚀 CRM & Analytics Business Suite")
+
+if st.session_state.db.empty:
+    st.warning("⚠️ La base de datos está vacía. Registra un cliente o importa un archivo en la pestaña 'Herramientas'.")
+    tab_dash, tab_mng, tab_tools = st.tabs(["📊 Dashboard", "👥 Clientes", "⚙️ Herramientas"])
+else:
+    # Preparar Datos con Alertas
+    working_df = st.session_state.db.copy()
+    working_df['Estado'] = working_df['Último Contacto'].apply(lambda x: get_alert_info(x)[0])
+
+    tab_dash, tab_mng, tab_tools = st.tabs(["📊 Dashboard de Ventas", "👥 Gestión de Clientes", "⚙️ Import/Export"])
+
+    # --- PESTAÑA 1: DASHBOARD ---
+    with tab_dash:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Clientes", len(working_df))
+        m2.metric("Críticos (15d)", len(working_df[working_df['Estado'].str.contains("🔴")]))
+        m3.metric("Seguimiento (10d)", len(working_df[working_df['Estado'].str.contains("🟠")]))
+        m4.metric("Nivel Platino", len(working_df[working_df['Nivel'] == "Platino"]))
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_pie = px.sunburst(working_df, path=['Nivel', 'Tipo'], title="Segmentación de Cartera",
+                                 color_discrete_sequence=px.colors.qualitative.Pastel)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+        with c2:
+            fig_bar = px.histogram(working_df, x="Estado", color="Estado", 
+                                  title="Urgencia de Seguimiento",
+                                  color_discrete_map={
+                                      "🔴 Critico (+15 días)": "#EF553B",
+                                      "🟠 Seguimiento (+10 días)": "#FFA15A",
+                                      "🟡 Contactar (+5 días)": "#FECB52",
+                                      "🟢 Al día": "#00CC96"
+                                  })
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+    # --- PESTAÑA 2: GESTIÓN ---
+    with tab_mng:
+        st.subheader("Búsqueda y Edición")
+        search = st.text_input("🔍 Buscar por Nombre o Empresa", "").lower()
+        
+        # Filtro de búsqueda
+        filtered_df = working_df[working_df['Nombre/Empresa'].str.lower().contains(search)]
+        
+        # Editor de datos interactivo
+        edited_df = st.data_editor(
+            filtered_df,
+            column_config={
+                "Estado": st.column_config.TextColumn("Alerta", disabled=True),
+                "Correo": st.column_config.LinkColumn("Enviar Email"),
+                "Último Contacto": st.column_config.DateColumn("Fecha Contacto"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic"
+        )
+        
+        if st.button("💾 Guardar Cambios en la Tabla"):
+            st.session_state.db = edited_df.drop(columns=['Estado'])
+            st.success("¡Base de datos actualizada!")
+            st.rerun()
+
+# --- PESTAÑA 3: HERRAMIENTAS (SIEMPRE DISPONIBLE) ---
+with tab_tools:
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.subheader("📥 Carga Masiva")
+        up_file = st.file_uploader("Subir CSV o Excel", type=["csv", "xlsx"], key="tools_up")
+        if up_file:
+            try:
+                if up_file.name.endswith('.csv'): df_new = pd.read_csv(up_file)
+                else: df_new = pd.read_excel(up_file)
+                
+                if st.button("Confirmar Importación"):
+                    st.session_state.db = pd.concat([st.session_state.db, df_new], ignore_index=True)
+                    st.success("Importación exitosa.")
+                    st.rerun()
+            except Exception as e: st.error(f"Error: {e}")
+
+    with col_b:
+        st.subheader("📤 Exportar Datos")
+        if not st.session_state.db.empty:
+            towrite = io.BytesIO()
+            st.session_state.db.to_excel(towrite, index=False, engine='xlsxwriter')
+            st.download_button(
+                label="Descargar Excel Completo",
+                data=towrite.getvalue(),
+                file_name=f"CRM_Report_{date.today()}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+            
+            if st.button("🗑️ Borrar TODA la Base de Datos", type="primary"):
+                st.session_state.db = pd.DataFrame(columns=st.session_state.db.columns)
+                st.rerun()
+
+
